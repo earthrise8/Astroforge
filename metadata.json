@@ -1,0 +1,5 @@
+{
+  "name": "AstroForge: AI Rocket Simulator",
+  "description": "A modular rocket flight simulator with physics-based flight, custom component assembly, and AI-powered mission control.",
+  "requestFramePermissions": []
+}
