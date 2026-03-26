@@ -60,8 +60,10 @@ export interface FlightState {
   velocity: [number, number, number];
   rotation: [number, number, number];
   liquidFuel: number;
+  liquidFuelBySegment: number[];
   srbFuel: number;
   maxLiquidFuel: number;
+  maxLiquidFuelBySegment: number[];
   maxSrbFuel: number;
   isEngineActive: boolean;
   isParachuteDeployed: boolean;

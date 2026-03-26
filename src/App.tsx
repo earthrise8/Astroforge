@@ -41,6 +41,7 @@ import {
   Globe,
   User,
   Eye,
+  Pin,
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -70,7 +71,8 @@ import {
   FlightState,
   Mission,
   FUEL_TYPES,
-  FuelType
+  FuelType,
+  Stage
 } from './types';
 import { cn } from './lib/utils';
 
@@ -114,8 +116,10 @@ const INITIAL_FLIGHT_STATE: FlightState = {
   velocity: [0, 0, 0],
   rotation: [0, 0, 0],
   liquidFuel: 0,
+  liquidFuelBySegment: [],
   srbFuel: 0,
   maxLiquidFuel: 0,
+  maxLiquidFuelBySegment: [],
   maxSrbFuel: 0,
   isEngineActive: false,
   isParachuteDeployed: false,
@@ -340,6 +344,80 @@ function SortableItem({
   );
 }
 
+interface SortableStageTimelineProps {
+  stageId: string;
+  idx: number;
+  isCurrent: boolean;
+  isPast: boolean;
+  isNext: boolean;
+  stage: Stage;
+  design: RocketDesign;
+  key?: React.Key;
+}
+
+interface FlightComponentPopup {
+  componentInstanceId: string;
+  x: number;
+  y: number;
+  pinned: boolean;
+}
+
+function SortableStageTimeline({ stageId, idx, isCurrent, isPast, isNext, stage, design }: SortableStageTimelineProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: stageId });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 50 : 0,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <motion.div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      initial={{ y: 20, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      className={cn(
+        "flex-shrink-0 w-12 h-12 rounded-xl border-2 flex flex-col items-center justify-center transition-all duration-500 relative cursor-grab active:cursor-grabbing",
+        isCurrent ? "bg-orange-500 border-orange-400 shadow-[0_0_20px_rgba(249,115,22,0.4)]" :
+        isPast ? "bg-slate-900 border-slate-800 opacity-40" :
+        "bg-slate-900 border-slate-700 hover:border-slate-600"
+      )}
+    >
+      {isCurrent && (
+        <motion.div 
+          layoutId="active-stage-glow-timeline"
+          className="absolute -inset-2 bg-orange-500/20 rounded-2xl blur-xl"
+        />
+      )}
+      <span className={cn(
+        "text-[10px] font-black uppercase tracking-tighter",
+        isCurrent ? "text-white" : "text-slate-500"
+      )}>
+        S{idx + 1}
+      </span>
+      <div className="flex gap-0.5 mt-0.5">
+        {stage.componentInstanceIds.slice(0, 2).map(id => {
+          const comp = design.components.find(c => c.instanceId === id);
+          if (!comp) return null;
+          return (
+            <div key={id} className={cn(
+              "w-0.5 h-0.5 rounded-full",
+              comp.type === 'engine' ? "bg-orange-400" :
+              comp.type === 'srb' ? "bg-red-400" :
+              comp.type === 'coupler' ? "bg-slate-400" :
+              "bg-green-400"
+            )} />
+          );
+        })}
+      </div>
+    </motion.div>
+  );
+}
+
 export default function App() {
   const [mode, setMode] = useState<'build' | 'flight'>('build');
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'components' | 'staging' | 'missions' | 'ai' | 'saved' | 'settings'>('components');
@@ -382,6 +460,9 @@ export default function App() {
   const [cameraZoom, setCameraZoom] = useState(1);
   const [timeWarp, setTimeWarp] = useState(1);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [isFlightShortcutsOpen, setIsFlightShortcutsOpen] = useState(true);
+  const [isFlightStagingOpen, setIsFlightStagingOpen] = useState(true);
+  const [flightComponentPopups, setFlightComponentPopups] = useState<FlightComponentPopup[]>([]);
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<{
@@ -418,6 +499,7 @@ export default function App() {
   // Refs for stable render loop
   const flightStateRef = useRef(flightState);
   const modeRef = useRef(mode);
+  const designRef = useRef(design);
   const cameraViewRef = useRef(cameraView);
   const cameraOffsetRef = useRef(cameraOffset);
   const cameraZoomRef = useRef(cameraZoom);
@@ -427,11 +509,114 @@ export default function App() {
 
   useEffect(() => { flightStateRef.current = flightState; }, [flightState]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { designRef.current = design; }, [design]);
   useEffect(() => { cameraViewRef.current = cameraView; }, [cameraView]);
   useEffect(() => { cameraOffsetRef.current = cameraOffset; }, [cameraOffset]);
   useEffect(() => { cameraZoomRef.current = cameraZoom; }, [cameraZoom]);
   useEffect(() => { timeWarpRef.current = timeWarp; }, [timeWarp]);
   useEffect(() => { countdownRef.current = countdown; }, [countdown]);
+
+  const getFuelMassForComponent = (comp: RocketComponent) => {
+    const scale = comp.customScale || 1;
+    const count = comp.type === 'srb' ? (comp.boosterCount || 1) : 1;
+    const fuelUnits = (comp.fuelCapacity || 0) * scale * count;
+    const fuelDensity = comp.fuelType ? FUEL_TYPES[comp.fuelType].density : 1;
+    return fuelUnits * fuelDensity;
+  };
+
+  const getSegmentAssignments = (detachedComponentIds: string[] = []) => {
+    const detachedSet = new Set(detachedComponentIds);
+    const segmentByComponent: Record<string, number> = {};
+    let segmentIndex = 0;
+    let lastMainSegment = 0;
+
+    design.components.forEach(comp => {
+      if (detachedSet.has(comp.instanceId)) return;
+
+      if (ATTACHMENT_TYPES.includes(comp.type)) {
+        segmentByComponent[comp.instanceId] = lastMainSegment;
+        return;
+      }
+
+      segmentByComponent[comp.instanceId] = segmentIndex;
+      lastMainSegment = segmentIndex;
+
+      if (comp.type === 'coupler') {
+        segmentIndex += 1;
+      }
+    });
+
+    return segmentByComponent;
+  };
+
+  const getLiquidFuelBySegment = (detachedComponentIds: string[] = []) => {
+    const detachedSet = new Set(detachedComponentIds);
+    const segmentByComponent = getSegmentAssignments(detachedComponentIds);
+    const fuelBySegment: number[] = [];
+
+    design.components.forEach(comp => {
+      if (detachedSet.has(comp.instanceId)) return;
+      if (comp.type === 'srb' || !comp.fuelCapacity) return;
+
+      const segment = segmentByComponent[comp.instanceId] || 0;
+      fuelBySegment[segment] = (fuelBySegment[segment] || 0) + getFuelMassForComponent(comp);
+    });
+
+    return fuelBySegment;
+  };
+
+  const getComponentFuelMass = (comp: RocketComponent, fs: FlightState) => {
+    if (fs.detachedComponentIds.includes(comp.instanceId)) return 0;
+
+    const activeComponents = design.components.filter(c => !fs.detachedComponentIds.includes(c.instanceId));
+
+    if (comp.type === 'srb') {
+      const totalSrbCapacity = activeComponents.reduce((sum, c) => {
+        if (c.type !== 'srb') return sum;
+        return sum + getFuelMassForComponent(c);
+      }, 0);
+
+      if (totalSrbCapacity <= 0) return 0;
+      return (fs.srbFuel / totalSrbCapacity) * getFuelMassForComponent(comp);
+    }
+
+    if (!comp.fuelCapacity) return 0;
+
+    const segmentByComponent = getSegmentAssignments(fs.detachedComponentIds);
+    const segment = segmentByComponent[comp.instanceId] || 0;
+    const segmentFuel = fs.liquidFuelBySegment[segment] || 0;
+
+    let segmentCapacity = 0;
+    activeComponents.forEach(c => {
+      if (c.type === 'srb' || !c.fuelCapacity) return;
+      if ((segmentByComponent[c.instanceId] || 0) !== segment) return;
+      segmentCapacity += getFuelMassForComponent(c);
+    });
+
+    if (segmentCapacity <= 0) return 0;
+    return (segmentFuel / segmentCapacity) * getFuelMassForComponent(comp);
+  };
+
+  const getComponentHeating = (comp: RocketComponent, fs: FlightState) => {
+    const speed = Math.sqrt(fs.velocity[0] ** 2 + fs.velocity[1] ** 2 + fs.velocity[2] ** 2);
+    const aeroHeating = Math.min(450, (speed * speed) / 220);
+    const stressHeating = fs.structuralStress * 1.1;
+    const engineBias = comp.type === 'engine' ? 1.15 : comp.type === 'srb' ? 1.05 : 0.45;
+    const activeBias = fs.activeComponentIds.includes(comp.instanceId) ? 40 : 0;
+
+    return Math.max(20, fs.engineTemperature * engineBias + aeroHeating + stressHeating + activeBias);
+  };
+
+  useEffect(() => {
+    if (mode !== 'flight') {
+      setFlightComponentPopups([]);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    const validIds = new Set(design.components.map(c => c.instanceId));
+    setFlightComponentPopups(prev => prev.filter(p => validIds.has(p.componentInstanceId)));
+  }, [design]);
 
   const capsuleOffset = useMemo(() => {
     let totalHeight = 0;
@@ -535,7 +720,7 @@ export default function App() {
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.screenSpacePanning = false;
-    controls.minDistance = 5;
+    controls.minDistance = 1.5;
     controls.maxDistance = 50;
     controls.maxPolarAngle = Math.PI / 1.5;
     controls.enabled = mode === 'build';
@@ -679,9 +864,12 @@ export default function App() {
     // Raycaster for selection
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
+    let isFlightPanning = false;
+    let lastPanX = 0;
+    let lastPanY = 0;
 
     const handleCanvasClick = (event: MouseEvent) => {
-      if (modeRef.current !== 'build' || !canvasRef.current) return;
+      if (!canvasRef.current) return;
       
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -690,23 +878,106 @@ export default function App() {
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObjects(rocket.children, true);
 
-      if (intersects.length > 0) {
-        let object = intersects[0].object;
-        while (object.parent && object.userData.index === undefined && object.parent !== rocket) {
-          object = object.parent;
-        }
-        
-        if (object.userData.index !== undefined) {
-          setSelectedComponentIndex(object.userData.index);
+      if (modeRef.current === 'build') {
+        if (intersects.length > 0) {
+          let object = intersects[0].object;
+          while (object.parent && object.userData.index === undefined && object.parent !== rocket) {
+            object = object.parent;
+          }
+          
+          if (object.userData.index !== undefined) {
+            setSelectedComponentIndex(object.userData.index);
+          } else {
+            setSelectedComponentIndex(null);
+          }
         } else {
           setSelectedComponentIndex(null);
         }
+        return;
+      }
+
+      if (modeRef.current !== 'flight') return;
+
+      if (intersects.length > 0) {
+        let object = intersects[0].object;
+        while (object.parent && !object.userData.instanceId && object.userData.index === undefined && object.parent !== rocket) {
+          object = object.parent;
+        }
+
+        let clickedInstanceId: string | undefined = object.userData.instanceId;
+        if (!clickedInstanceId && object.userData.index !== undefined) {
+          clickedInstanceId = designRef.current.components[object.userData.index]?.instanceId;
+        }
+
+        if (clickedInstanceId) {
+          const popupWidth = 230;
+          const popupHeight = 130;
+          const x = Math.max(12, Math.min(rect.width - popupWidth - 12, event.clientX - rect.left + 12));
+          const y = Math.max(12, Math.min(rect.height - popupHeight - 12, event.clientY - rect.top + 12));
+
+          setFlightComponentPopups(prev => {
+            const pinnedPopups = prev.filter(p => p.pinned);
+            const existingPinned = pinnedPopups.find(p => p.componentInstanceId === clickedInstanceId);
+            if (existingPinned) return prev;
+            return [...pinnedPopups, { componentInstanceId: clickedInstanceId, x, y, pinned: false }];
+          });
+        } else {
+          setFlightComponentPopups(prev => prev.filter(p => p.pinned));
+        }
       } else {
-        setSelectedComponentIndex(null);
+        setFlightComponentPopups(prev => prev.filter(p => p.pinned));
       }
     };
 
+    const handleMouseDown = (event: MouseEvent) => {
+      if (modeRef.current !== 'flight') return;
+      if (event.button !== 2) return;
+      event.preventDefault();
+      isFlightPanning = true;
+      lastPanX = event.clientX;
+      lastPanY = event.clientY;
+    };
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (modeRef.current !== 'flight' || !isFlightPanning) return;
+
+      const dx = event.clientX - lastPanX;
+      const dy = event.clientY - lastPanY;
+      lastPanX = event.clientX;
+      lastPanY = event.clientY;
+
+      const panScale = 0.02;
+      setCameraOffset(prev => ({
+        ...prev,
+        x: prev.x - dx * panScale,
+        y: prev.y + dy * panScale,
+      }));
+    };
+
+    const stopFlightPan = () => {
+      isFlightPanning = false;
+    };
+
+    const handleFlightWheel = (event: WheelEvent) => {
+      if (modeRef.current !== 'flight') return;
+      event.preventDefault();
+
+      const zoomStep = 0.0015;
+      setCameraZoom(prev => Math.max(0.2, Math.min(10, prev + event.deltaY * zoomStep)));
+    };
+
+    const handleContextMenu = (event: MouseEvent) => {
+      if (modeRef.current !== 'flight') return;
+      event.preventDefault();
+    };
+
     renderer.domElement.addEventListener('click', handleCanvasClick);
+    renderer.domElement.addEventListener('mousedown', handleMouseDown);
+    renderer.domElement.addEventListener('mousemove', handleMouseMove);
+    renderer.domElement.addEventListener('mouseup', stopFlightPan);
+    renderer.domElement.addEventListener('mouseleave', stopFlightPan);
+    renderer.domElement.addEventListener('wheel', handleFlightWheel, { passive: false });
+    renderer.domElement.addEventListener('contextmenu', handleContextMenu);
 
     sceneRef.current = { 
       scene, camera, renderer, rocket, ground, stars, controls, trailLine, comMarker,
@@ -744,6 +1015,12 @@ export default function App() {
     return () => {
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener('click', handleCanvasClick);
+      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
+      renderer.domElement.removeEventListener('mousemove', handleMouseMove);
+      renderer.domElement.removeEventListener('mouseup', stopFlightPan);
+      renderer.domElement.removeEventListener('mouseleave', stopFlightPan);
+      renderer.domElement.removeEventListener('wheel', handleFlightWheel);
+      renderer.domElement.removeEventListener('contextmenu', handleContextMenu);
       renderer.dispose();
     };
   }, []);
@@ -1007,6 +1284,12 @@ export default function App() {
       // Calculate total height and CoM
       let totalHeight = 0;
       const activeComponents = design.components.filter(c => !newState.detachedComponentIds.includes(c.instanceId));
+      const segmentByComponent = getSegmentAssignments(newState.detachedComponentIds);
+      let liquidFuelBySegment = [...(newState.liquidFuelBySegment || [])];
+
+      if (liquidFuelBySegment.length === 0) {
+        liquidFuelBySegment = getLiquidFuelBySegment(newState.detachedComponentIds);
+      }
       
       activeComponents.forEach(c => {
         if (ATTACHMENT_TYPES.includes(c.type)) return;
@@ -1021,13 +1304,22 @@ export default function App() {
 
       let totalMass = 0;
       let weightedY = 0;
-      let totalLiquidFuelCapacity = activeComponents.reduce((sum, c) => {
-        if (c.type === 'srb') return sum;
-        return sum + (c.fuelCapacity || 0) * (c.customScale || 1);
-      }, 0);
+      const liquidFuelCapacityBySegment: number[] = [];
+      activeComponents.forEach(c => {
+        if (c.type === 'srb' || !c.fuelCapacity) return;
+        const segment = segmentByComponent[c.instanceId] || 0;
+        liquidFuelCapacityBySegment[segment] = (liquidFuelCapacityBySegment[segment] || 0) + getFuelMassForComponent(c);
+      });
+
+      liquidFuelBySegment = liquidFuelBySegment.map((fuel, idx) => {
+        if ((liquidFuelCapacityBySegment[idx] || 0) <= 0) return 0;
+        return fuel;
+      });
+
+      const totalLiquidFuelCapacity = liquidFuelCapacityBySegment.reduce((sum, fuel) => sum + (fuel || 0), 0);
       let totalSrbFuelCapacity = activeComponents.reduce((sum, c) => {
         if (c.type !== 'srb') return sum;
-        return sum + (c.fuelCapacity || 0) * (c.customScale || 1) * (c.boosterCount || 1);
+        return sum + getFuelMassForComponent(c);
       }, 0);
       
       let currentY = totalHeight;
@@ -1046,11 +1338,14 @@ export default function App() {
         let fuelInComp = 0;
         if (comp.type === 'srb') {
           if (comp.fuelCapacity && totalSrbFuelCapacity > 0) {
-            fuelInComp = (newState.srbFuel / totalSrbFuelCapacity) * (comp.fuelCapacity * scale * boosterCount);
+            fuelInComp = (newState.srbFuel / totalSrbFuelCapacity) * getFuelMassForComponent(comp);
           }
         } else {
-          if (comp.fuelCapacity && totalLiquidFuelCapacity > 0) {
-            fuelInComp = (newState.liquidFuel / totalLiquidFuelCapacity) * (comp.fuelCapacity * scale);
+          const segment = segmentByComponent[comp.instanceId] || 0;
+          const segmentFuel = liquidFuelBySegment[segment] || 0;
+          const segmentCapacity = liquidFuelCapacityBySegment[segment] || 0;
+          if (comp.fuelCapacity && segmentCapacity > 0) {
+            fuelInComp = (segmentFuel / segmentCapacity) * getFuelMassForComponent(comp);
           }
         }
         
@@ -1084,13 +1379,18 @@ export default function App() {
       let currentThrust = 0;
       let liquidBurnRate = 0;
       let srbBurnRate = 0;
+      const liquidBurnBySegment: number[] = [];
 
       const componentThrusts = activeComponents.map(c => {
         const scale = c.customScale || 1;
         if (c.type === 'engine') {
-          if (newState.activeComponentIds.includes(c.instanceId) && newState.liquidFuel > 0) {
+          const segment = segmentByComponent[c.instanceId] || 0;
+          const segmentFuel = liquidFuelBySegment[segment] || 0;
+          if (newState.activeComponentIds.includes(c.instanceId) && segmentFuel > 0) {
             const t = (c.thrust || 0) * scale * newState.throttle;
-            liquidBurnRate += t / (GRAVITY * (c.isp || 300));
+            const burnRate = t / (GRAVITY * (c.isp || 300));
+            liquidBurnRate += burnRate;
+            liquidBurnBySegment[segment] = (liquidBurnBySegment[segment] || 0) + burnRate;
             return t;
           }
         } else if (c.type === 'srb') {
@@ -1158,7 +1458,17 @@ export default function App() {
         
         // Burn fuel
         newState.fuelFlowRate = liquidBurnRate + srbBurnRate;
-        newState.liquidFuel = Math.max(0, newState.liquidFuel - liquidBurnRate * dt);
+        liquidBurnBySegment.forEach((burnRate, segment) => {
+          if (!burnRate) return;
+          liquidFuelBySegment[segment] = Math.max(0, (liquidFuelBySegment[segment] || 0) - burnRate * dt);
+        });
+        newState.liquidFuelBySegment = liquidFuelBySegment;
+        newState.maxLiquidFuelBySegment = liquidFuelCapacityBySegment;
+        newState.liquidFuel = liquidFuelBySegment.reduce((sum, fuel, idx) => {
+          if ((liquidFuelCapacityBySegment[idx] || 0) <= 0) return sum;
+          return sum + fuel;
+        }, 0);
+        newState.maxLiquidFuel = totalLiquidFuelCapacity;
         newState.srbFuel = Math.max(0, newState.srbFuel - srbBurnRate * dt);
         
         // Engine Temperature: Increases when active
@@ -1758,6 +2068,7 @@ export default function App() {
   const resetBuild = () => {
     setMode('build');
     setFlightState(INITIAL_FLIGHT_STATE);
+    setFlightComponentPopups([]);
     setCountdown(null);
     setTimeWarp(1);
     setCameraView('follow');
@@ -1827,21 +2138,31 @@ export default function App() {
     }
   };
 
-  const addStage = () => {
-    setDesign(prev => ({
+  const syncFlightStages = (stages: RocketDesign['stages']) => {
+    setFlightState(prev => ({
       ...prev,
-      stages: [
-        ...(prev.stages || []),
-        { id: `stage-${Date.now()}`, componentInstanceIds: [] }
-      ]
+      stages,
+      currentStageIndex: Math.min(prev.currentStageIndex, stages.length),
     }));
   };
 
+  const addStage = () => {
+    setDesign(prev => {
+      const stages = [
+        ...(prev.stages || []),
+        { id: `stage-${Date.now()}`, componentInstanceIds: [] }
+      ];
+      syncFlightStages(stages);
+      return { ...prev, stages };
+    });
+  };
+
   const removeStage = (stageId: string) => {
-    setDesign(prev => ({
-      ...prev,
-      stages: (prev.stages || []).filter(s => s.id !== stageId)
-    }));
+    setDesign(prev => {
+      const stages = (prev.stages || []).filter(s => s.id !== stageId);
+      syncFlightStages(stages);
+      return { ...prev, stages };
+    });
   };
 
   const reorderStage = (index: number, direction: 'up' | 'down') => {
@@ -1850,33 +2171,36 @@ export default function App() {
       const newIndex = direction === 'up' ? index - 1 : index + 1;
       if (newIndex < 0 || newIndex >= stages.length) return prev;
       [stages[index], stages[newIndex]] = [stages[newIndex], stages[index]];
+      syncFlightStages(stages);
       return { ...prev, stages };
     });
   };
 
   const addComponentToStage = (stageId: string, componentInstanceId: string) => {
-    setDesign(prev => ({
-      ...prev,
-      stages: (prev.stages || []).map(s => {
+    setDesign(prev => {
+      const stages = (prev.stages || []).map(s => {
         if (s.id === stageId) {
           if (s.componentInstanceIds.includes(componentInstanceId)) return s;
           return { ...s, componentInstanceIds: [...s.componentInstanceIds, componentInstanceId] };
         }
         return s;
-      })
-    }));
+      });
+      syncFlightStages(stages);
+      return { ...prev, stages };
+    });
   };
 
   const removeComponentFromStage = (stageId: string, componentInstanceId: string) => {
-    setDesign(prev => ({
-      ...prev,
-      stages: (prev.stages || []).map(s => {
+    setDesign(prev => {
+      const stages = (prev.stages || []).map(s => {
         if (s.id === stageId) {
           return { ...s, componentInstanceIds: s.componentInstanceIds.filter(id => id !== componentInstanceId) };
         }
         return s;
-      })
-    }));
+      });
+      syncFlightStages(stages);
+      return { ...prev, stages };
+    });
   };
 
   const activateNextStage = () => {
@@ -1943,34 +2267,28 @@ export default function App() {
   };
 
   const startFlight = () => {
-    const liquidFuel = design.components.reduce((sum, c) => {
-      if (c.type === 'srb') return sum;
-      const scale = c.customScale || 1;
-      const fuelUnits = (c.fuelCapacity || 0) * scale;
-      const fuelDensity = c.fuelType ? FUEL_TYPES[c.fuelType].density : 1;
-      return sum + (fuelUnits * fuelDensity);
-    }, 0);
+    const liquidFuelBySegment = getLiquidFuelBySegment();
+    const liquidFuel = liquidFuelBySegment.reduce((sum, fuel) => sum + fuel, 0);
 
     const srbFuel = design.components.reduce((sum, c) => {
       if (c.type !== 'srb') return sum;
-      const scale = c.customScale || 1;
-      const count = c.boosterCount || 1;
-      const fuelUnits = (c.fuelCapacity || 0) * scale * count;
-      const fuelDensity = c.fuelType ? FUEL_TYPES[c.fuelType].density : 1;
-      return sum + (fuelUnits * fuelDensity);
+      return sum + getFuelMassForComponent(c);
     }, 0);
     
     setFlightState({
       ...INITIAL_FLIGHT_STATE,
       liquidFuel,
+      liquidFuelBySegment,
       srbFuel,
       maxLiquidFuel: liquidFuel,
+      maxLiquidFuelBySegment: [...liquidFuelBySegment],
       maxSrbFuel: srbFuel,
       isLanded: true,
       missionStatus: activeMissionId ? 'active' : 'idle',
       stages: design.stages,
     });
     setMode('flight');
+    setFlightComponentPopups([]);
     setCameraOffset({ x: 0, y: 0, z: 0 });
     setCameraZoom(1);
     setCountdown(3);
@@ -2596,65 +2914,6 @@ export default function App() {
                 exit={{ x: -400, opacity: 0 }}
                 className="w-80 flex flex-col gap-4 pointer-events-auto"
               >
-                {/* Staging Timeline */}
-                <div className="fixed left-6 top-1/2 -translate-y-1/2 flex flex-col items-center py-8 gap-4 pointer-events-none z-50">
-                  <div className="w-1 h-full bg-slate-800/50 absolute left-1/2 -translate-x-1/2 z-0 rounded-full" />
-                  
-                  {(flightState.stages || []).map((stage, idx) => {
-                    const isCurrent = idx === flightState.currentStageIndex - 1;
-                    const isPast = idx < flightState.currentStageIndex - 1;
-                    const isNext = idx === flightState.currentStageIndex;
-
-                    return (
-                      <motion.div
-                        key={stage.id}
-                        initial={{ x: -20, opacity: 0 }}
-                        animate={{ x: 0, opacity: 1 }}
-                        className={cn(
-                          "w-12 h-12 rounded-xl border-2 flex flex-col items-center justify-center z-10 transition-all duration-500 relative",
-                          isCurrent ? "bg-orange-500 border-orange-400 scale-110 shadow-[0_0_20px_rgba(249,115,22,0.4)]" :
-                          isPast ? "bg-slate-900 border-slate-800 opacity-40" :
-                          "bg-slate-900 border-slate-700"
-                        )}
-                      >
-                        {isCurrent && (
-                          <motion.div 
-                            layoutId="active-stage-glow"
-                            className="absolute -inset-2 bg-orange-500/20 rounded-2xl blur-xl"
-                          />
-                        )}
-                        <span className={cn(
-                          "text-[10px] font-black uppercase tracking-tighter",
-                          isCurrent ? "text-white" : "text-slate-500"
-                        )}>
-                          S{idx + 1}
-                        </span>
-                        <div className="flex gap-0.5 mt-0.5">
-                          {stage.componentInstanceIds.slice(0, 3).map(id => {
-                            const comp = design.components.find(c => c.instanceId === id);
-                            if (!comp) return null;
-                            return (
-                              <div key={id} className={cn(
-                                "w-1 h-1 rounded-full",
-                                comp.type === 'engine' ? "bg-orange-400" :
-                                comp.type === 'srb' ? "bg-red-400" :
-                                comp.type === 'coupler' ? "bg-slate-400" :
-                                "bg-green-400"
-                              )} />
-                            );
-                          })}
-                        </div>
-                        {isNext && (
-                          <div className="absolute -right-12 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                            <div className="w-2 h-2 bg-orange-500 rounded-full animate-ping" />
-                            <span className="text-[8px] font-black text-orange-500 uppercase whitespace-nowrap">Next</span>
-                          </div>
-                        )}
-                      </motion.div>
-                    );
-                  })}
-                </div>
-
                 {/* Flight Stats */}
                 <div className="bg-slate-900/80 backdrop-blur-md border border-slate-700 p-6 rounded-2xl shadow-2xl space-y-6">
                   {/* Active Mission Progress */}
@@ -2921,6 +3180,70 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            {mode === 'flight' && (
+              <div className="absolute inset-0 z-30 pointer-events-none">
+                {flightComponentPopups.map((popup) => {
+                  const comp = design.components.find(c => c.instanceId === popup.componentInstanceId);
+                  if (!comp) return null;
+
+                  const fuelMass = getComponentFuelMass(comp, flightState);
+                  const heating = getComponentHeating(comp, flightState);
+
+                  return (
+                    <div
+                      key={popup.componentInstanceId}
+                      className="absolute w-56 bg-slate-900/90 border border-slate-700 rounded-xl shadow-xl backdrop-blur-sm p-3 pointer-events-auto"
+                      style={{ left: popup.x, top: popup.y }}
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Component</div>
+                          <div className="text-xs font-bold text-slate-100 truncate max-w-[150px]">{comp.name}</div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setFlightComponentPopups(prev => prev.map(p => {
+                              if (p.componentInstanceId !== popup.componentInstanceId) return p;
+                              return { ...p, pinned: !p.pinned };
+                            }));
+                          }}
+                          className={cn(
+                            "p-1 rounded-md border transition-colors",
+                            popup.pinned
+                              ? "bg-orange-500/20 border-orange-500/40 text-orange-300"
+                              : "bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200"
+                          )}
+                          title={popup.pinned ? 'Unpin popup' : 'Pin popup'}
+                        >
+                          <Pin className="w-3 h-3" />
+                        </button>
+                      </div>
+
+                      <div className="space-y-1.5 text-[10px] uppercase tracking-wider font-bold">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500">Fuel</span>
+                          <span className="font-mono text-blue-300">{fuelMass.toFixed(1)} kg</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500">Heating</span>
+                          <span className={cn("font-mono", heating > 900 ? "text-red-400" : heating > 550 ? "text-orange-300" : "text-green-300")}>{heating.toFixed(0)} C</span>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          setFlightComponentPopups(prev => prev.filter(p => p.componentInstanceId !== popup.componentInstanceId));
+                        }}
+                        className="mt-2 text-[9px] text-slate-500 hover:text-slate-300 uppercase tracking-widest font-bold"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Right Panel: Active Design or Flight Status */}
@@ -3047,19 +3370,200 @@ export default function App() {
                 initial={{ x: 400, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
                 exit={{ x: 400, opacity: 0 }}
-                className="w-80 flex flex-col gap-4 pointer-events-auto ml-auto"
+                className="w-80 max-h-[calc(100vh-220px)] overflow-y-auto custom-scrollbar flex flex-col gap-4 pointer-events-auto ml-auto pr-1"
               >
-                {/* Controls Hint */}
-                <div className="bg-slate-900/60 backdrop-blur-sm p-4 rounded-xl border border-slate-800 text-[10px] text-slate-400 space-y-2">
-                  <div className="flex justify-between"><span>STAGE</span> <span className="text-orange-400 font-black font-mono">ENTER</span></div>
-                  <div className="flex justify-between"><span>THRUST</span> <span className="text-slate-200 font-mono">SPACE</span></div>
-                  <div className="flex justify-between"><span>THROTTLE</span> <span className="text-slate-200 font-mono">SHIFT/CTRL</span></div>
-                  <div className="flex justify-between"><span>PITCH/YAW</span> <span className="text-slate-200 font-mono">WASD</span></div>
-                  <div className="flex justify-between"><span>ROLL</span> <span className="text-slate-200 font-mono">QE</span></div>
-                  <div className="flex justify-between"><span>PARACHUTE</span> <span className="text-slate-200 font-mono">P</span></div>
-                  <div className="flex justify-between"><span>CAMERA VIEW</span> <span className="text-slate-200 font-mono">1-4</span></div>
-                  <div className="flex justify-between"><span>PAN/ZOOM</span> <span className="text-slate-200 font-mono">ARROWS / +/-</span></div>
-                  <div className="flex justify-between"><span>TIME WARP</span> <span className="text-slate-200 font-mono">[ / ]</span></div>
+                <div className="bg-slate-900/60 backdrop-blur-sm p-3 rounded-xl border border-slate-800 space-y-3">
+                  <button
+                    onClick={() => setIsFlightShortcutsOpen(prev => !prev)}
+                    className="w-full flex items-center justify-between text-[10px] text-slate-300 uppercase tracking-widest font-bold hover:text-white transition-colors"
+                  >
+                    <span>Flight Shortcuts</span>
+                    {isFlightShortcutsOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {isFlightShortcutsOpen && (
+                    <div className="text-[10px] text-slate-400 space-y-2">
+                      <div className="flex justify-between"><span>STAGE</span> <span className="text-orange-400 font-black font-mono">ENTER</span></div>
+                      <div className="flex justify-between"><span>THRUST</span> <span className="text-slate-200 font-mono">SPACE</span></div>
+                      <div className="flex justify-between"><span>THROTTLE</span> <span className="text-slate-200 font-mono">SHIFT/CTRL</span></div>
+                      <div className="flex justify-between"><span>PITCH/YAW</span> <span className="text-slate-200 font-mono">WASD</span></div>
+                      <div className="flex justify-between"><span>ROLL</span> <span className="text-slate-200 font-mono">QE</span></div>
+                      <div className="flex justify-between"><span>PARACHUTE</span> <span className="text-slate-200 font-mono">P</span></div>
+                      <div className="flex justify-between"><span>CAMERA VIEW</span> <span className="text-slate-200 font-mono">1-4</span></div>
+                      <div className="flex justify-between"><span>PAN/ZOOM</span> <span className="text-slate-200 font-mono">ARROWS / +/-</span></div>
+                      <div className="flex justify-between"><span>TIME WARP</span> <span className="text-slate-200 font-mono">[ / ]</span></div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Staging Timeline - Horizontal */}
+                {(flightState.stages || []).length > 0 && (
+                  <div className="bg-slate-900/60 backdrop-blur-sm p-3 rounded-xl border border-slate-800">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Rocket className="w-3 h-3 text-orange-400" />
+                      <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">Stage Timeline</span>
+                    </div>
+                    <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
+                      <div className="h-0.5 absolute bottom-8 left-0 right-0 bg-slate-800/30 mx-3" />
+                      <DndContext 
+                        sensors={sensors}
+                        collisionDetection={closestCenter}
+                        onDragEnd={(event) => {
+                          const { active, over } = event;
+                          if (over && active.id !== over.id) {
+                            const oldIndex = (flightState.stages || []).findIndex(s => s.id === active.id);
+                            const newIndex = (flightState.stages || []).findIndex(s => s.id === over.id);
+                            if (oldIndex > newIndex) {
+                              reorderStage(oldIndex, 'up');
+                            } else {
+                              reorderStage(oldIndex, 'down');
+                            }
+                          }
+                        }}
+                      >
+                        <SortableContext 
+                          items={(flightState.stages || []).map(s => s.id)}
+                          strategy={verticalListSortingStrategy}
+                        >
+                          {(flightState.stages || []).map((stage, idx) => {
+                            const isCurrent = idx === flightState.currentStageIndex - 1;
+                            const isPast = idx < flightState.currentStageIndex - 1;
+                            const isNext = idx === flightState.currentStageIndex;
+
+                            return (
+                              <SortableStageTimeline
+                                key={stage.id}
+                                stageId={stage.id}
+                                idx={idx}
+                                isCurrent={isCurrent}
+                                isPast={isPast}
+                                isNext={isNext}
+                                stage={stage}
+                                design={design}
+                              />
+                            );
+                          })}
+                        </SortableContext>
+                      </DndContext>
+                    </div>
+                  </div>
+                )}
+
+                <div className="bg-slate-900/70 backdrop-blur-sm border border-slate-800 rounded-2xl overflow-hidden">
+                  <button
+                    onClick={() => setIsFlightStagingOpen(prev => !prev)}
+                    className="w-full px-4 py-3 border-b border-slate-800 flex items-center justify-between"
+                  >
+                    <div className="flex items-center gap-2">
+                      <LayoutGrid className="w-4 h-4 text-orange-400" />
+                      <span className="text-xs font-black uppercase tracking-widest text-slate-300">In-Flight Staging</span>
+                    </div>
+                    {isFlightStagingOpen ? <ChevronUp className="w-3 h-3 text-slate-500" /> : <ChevronDown className="w-3 h-3 text-slate-500" />}
+                  </button>
+
+                  {isFlightStagingOpen && (
+                    <div className="max-h-80 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                      <div className="flex justify-between items-center">
+                        <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-500">Staging Sequence</h3>
+                        <button
+                          onClick={addStage}
+                          className="px-2 py-1 text-[9px] rounded-md bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 border border-orange-500/30 transition-colors flex items-center gap-1"
+                        >
+                          <Plus className="w-3 h-3" /> Add Stage
+                        </button>
+                      </div>
+
+                      {(design.stages || []).length === 0 ? (
+                        <div className="py-6 text-center rounded-lg border border-dashed border-slate-700 bg-slate-900/40">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">No stages defined</p>
+                          <p className="text-[9px] text-slate-600 mt-1 italic">Add a stage to begin sequencing your launch.</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {(design.stages || []).map((stage, sIdx) => (
+                            <div key={stage.id} className="bg-slate-800/40 border border-slate-700 rounded-xl overflow-hidden">
+                              <div className="p-3 bg-slate-900/50 border-b border-slate-700/50">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-orange-500" />
+                                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">Stage {sIdx + 1}</span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={() => reorderStage(sIdx, 'up')}
+                                      disabled={sIdx === 0}
+                                      className="p-1 rounded hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-slate-500 hover:text-slate-300"
+                                    >
+                                      <ChevronUp className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => reorderStage(sIdx, 'down')}
+                                      disabled={sIdx === (design.stages?.length || 0) - 1}
+                                      className="p-1 rounded hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-slate-500 hover:text-slate-300"
+                                    >
+                                      <ChevronDown className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => removeStage(stage.id)}
+                                      className="p-1 rounded hover:bg-red-500/20 text-slate-500 hover:text-red-400"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="p-3 space-y-2">
+                                <div className="space-y-1.5">
+                                  {stage.componentInstanceIds.map(id => {
+                                    const comp = design.components.find(c => c.instanceId === id);
+                                    if (!comp) return null;
+                                    return (
+                                      <div key={id} className="flex items-center justify-between p-2 bg-slate-900/50 rounded-lg border border-slate-700/50 group">
+                                        <div className="flex items-center gap-2">
+                                          {comp.type === 'engine' && <Zap className="w-3 h-3 text-orange-400" />}
+                                          {comp.type === 'srb' && <Flame className="w-3 h-3 text-red-400" />}
+                                          {comp.type === 'coupler' && <LinkIcon className="w-3 h-3 text-slate-400" />}
+                                          {comp.type === 'parachute' && <ArrowDownCircle className="w-3 h-3 text-green-400" />}
+                                          <span className="text-[10px] font-medium truncate max-w-[120px]">{comp.name}</span>
+                                        </div>
+                                        <button
+                                          onClick={() => removeComponentFromStage(stage.id, id)}
+                                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-500/20 rounded text-red-400 transition-all"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+
+                                <div className="pt-2">
+                                  <select
+                                    onChange={(e) => {
+                                      if (e.target.value) {
+                                        addComponentToStage(stage.id, e.target.value);
+                                        e.target.value = "";
+                                      }
+                                    }}
+                                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg py-1.5 px-2 text-[10px] text-slate-400 focus:outline-none focus:border-orange-500/50"
+                                  >
+                                    <option value="">+ Add Component</option>
+                                    {design.components
+                                      .filter(c => ['engine', 'srb', 'coupler', 'parachute'].includes(c.type))
+                                      .filter(c => !stage.componentInstanceIds.includes(c.instanceId))
+                                      .map(c => (
+                                        <option key={c.instanceId} value={c.instanceId}>{c.name}</option>
+                                      ))
+                                    }
+                                  </select>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {flightState.missionStatus === 'failed' && (
