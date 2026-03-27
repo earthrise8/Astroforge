@@ -45,7 +45,6 @@ import {
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from "@google/genai";
 import { 
   DndContext, 
   closestCenter,
@@ -155,6 +154,12 @@ interface SortableItemProps {
   onUpdate: (updates: Partial<RocketComponent>) => void;
   key?: React.Key;
 }
+
+type LaunchValidationIssue = {
+  id: string;
+  severity: 'error' | 'warning';
+  message: string;
+};
 
 function SortableItem({ 
   comp, 
@@ -657,41 +662,117 @@ export default function App() {
     return totalHeight - 0.5;
   }, [design]);
 
+  const launchValidationIssues = useMemo<LaunchValidationIssue[]>(() => {
+    const issues: LaunchValidationIssue[] = [];
+    const propulsionComponents = design.components.filter(c => c.type === 'engine' || c.type === 'srb');
+
+    if (design.components.length === 0) {
+      issues.push({
+        id: 'empty-design',
+        severity: 'error',
+        message: 'No components in vehicle. Add at least one command module and propulsion system.',
+      });
+      return issues;
+    }
+
+    if (propulsionComponents.length === 0) {
+      issues.push({
+        id: 'no-propulsion',
+        severity: 'error',
+        message: 'No propulsion detected. Add at least one engine or SRB.',
+      });
+    }
+
+    const totalFuelMass = design.components.reduce((sum, component) => {
+      return sum + getFuelMassForComponent(component);
+    }, 0);
+
+    if (totalFuelMass <= 0) {
+      issues.push({
+        id: 'no-fuel',
+        severity: 'error',
+        message: 'No usable fuel detected. Add a fueled tank or SRB to launch safely.',
+      });
+    }
+
+    const stages = design.stages || [];
+    const componentIds = new Set(design.components.map(c => c.instanceId));
+
+    if (stages.length === 0) {
+      issues.push({
+        id: 'no-stages',
+        severity: 'warning',
+        message: 'No staging sequence defined. You can still fly, but in-flight activation will be manual.',
+      });
+    } else {
+      stages.forEach((stage, idx) => {
+        if (stage.componentInstanceIds.length === 0) {
+          issues.push({
+            id: `empty-stage-${stage.id}`,
+            severity: 'warning',
+            message: `Stage ${idx + 1} is empty and will do nothing when activated.`,
+          });
+        }
+
+        const invalidIds = stage.componentInstanceIds.filter(id => !componentIds.has(id));
+        if (invalidIds.length > 0) {
+          issues.push({
+            id: `invalid-stage-refs-${stage.id}`,
+            severity: 'error',
+            message: `Stage ${idx + 1} references missing components and needs repair.`,
+          });
+        }
+      });
+
+      const firstStage = stages[0];
+      const firstStagePropulsion = firstStage?.componentInstanceIds.some(id => {
+        const component = design.components.find(c => c.instanceId === id);
+        return component?.type === 'engine' || component?.type === 'srb';
+      }) || false;
+
+      if (!firstStagePropulsion) {
+        issues.push({
+          id: 'stage-1-no-propulsion',
+          severity: 'error',
+          message: 'Stage 1 has no propulsion assigned. Add an engine or SRB to the first stage.',
+        });
+      }
+    }
+
+    return issues;
+  }, [design]);
+
+  const hasBlockingLaunchIssue = launchValidationIssues.some(issue => issue.severity === 'error');
+
   // Gemini AI Integration
   const analyzeRocket = async () => {
     setIsAiLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const totalMass = design.components.reduce((sum, c) => {
-        const scale = c.customScale || 1;
-        const fuelMass = (c.fuelCapacity || 0) * (c.fuelType ? FUEL_TYPES[c.fuelType].density : 1) * scale;
-        return sum + (c.mass * scale) + fuelMass;
-      }, 0);
-      const totalThrust = design.components.reduce((sum, c) => {
-        const scale = c.customScale || 1;
-        return sum + (c.thrust || 0) * scale;
-      }, 0);
-      const totalFuel = design.components.reduce((sum, c) => {
-        const scale = c.customScale || 1;
-        return sum + (c.fuelCapacity || 0) * scale;
-      }, 0);
-      
-      const prompt = `Analyze this rocket design for a flight simulator:
-      Components: ${design.components.map(c => c.name).join(', ')}
-      Total Mass (Full): ${totalMass}kg
-      Total Thrust: ${totalThrust}N
-      Total Fuel: ${totalFuel}kg
-      
-      Give a short, technical advice (max 3 sentences) as "Mission Control". Mention if it can reach orbit or if it's too heavy.`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
+      const response = await fetch('/api/analysis/rocket', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          components: design.components,
+        }),
       });
-      setAiAdvice(response.text || "Design looks nominal. Ready for launch.");
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const errorMessage = (errorPayload && errorPayload.error) || 'Mission Control unavailable.';
+        throw new Error(errorMessage);
+      }
+
+      const payload = await response.json();
+      setAiAdvice(payload.advice || "Design looks nominal. Ready for launch.");
     } catch (error) {
       console.error("AI Analysis failed", error);
-      setAiAdvice("Mission Control offline. Proceed with caution.");
+      if (error instanceof Error && error.message) {
+        setAiAdvice(`Mission Control offline: ${error.message}`);
+      } else {
+        setAiAdvice("Mission Control offline. Proceed with caution.");
+      }
     } finally {
       setIsAiLoading(false);
     }
@@ -2339,6 +2420,11 @@ export default function App() {
   };
 
   const startFlight = () => {
+    if (hasBlockingLaunchIssue) {
+      setActiveNavTab('staging');
+      return;
+    }
+
     const liquidFuelBySegment = getLiquidFuelBySegment();
     const liquidFuel = liquidFuelBySegment.reduce((sum, fuel) => sum + fuel, 0);
 
@@ -2482,13 +2568,47 @@ export default function App() {
 
           <div className="flex gap-4">
             {mode === 'build' ? (
-              <button 
-                onClick={startFlight}
-                className="bg-orange-600 hover:bg-orange-500 text-white px-8 py-3 rounded-full font-bold flex items-center gap-2 transition-all shadow-lg shadow-orange-900/20 group"
-              >
-                <Play className="w-5 h-5 group-hover:scale-125 transition-transform" />
-                SEND TO LAUNCH PAD
-              </button>
+              <div className="flex flex-col items-end gap-2 max-w-[26rem]">
+                <button 
+                  onClick={startFlight}
+                  disabled={hasBlockingLaunchIssue}
+                  className={cn(
+                    "text-white px-8 py-3 rounded-full font-bold flex items-center gap-2 transition-all shadow-lg shadow-orange-900/20 group",
+                    hasBlockingLaunchIssue
+                      ? "bg-orange-900/50 text-orange-200/70 cursor-not-allowed"
+                      : "bg-orange-600 hover:bg-orange-500"
+                  )}
+                >
+                  <Play className="w-5 h-5 group-hover:scale-125 transition-transform" />
+                  {hasBlockingLaunchIssue ? "FIX ISSUES TO LAUNCH" : "SEND TO LAUNCH PAD"}
+                </button>
+
+                {launchValidationIssues.length > 0 && (
+                  <div className="w-full rounded-xl border border-slate-700/80 bg-slate-900/80 backdrop-blur-sm p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-400" />
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-300">Pre-Launch Checklist</span>
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        {launchValidationIssues.filter(issue => issue.severity === 'error').length} ERR / {launchValidationIssues.filter(issue => issue.severity === 'warning').length} WARN
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1">
+                      {launchValidationIssues.map(issue => (
+                        <div key={issue.id} className="flex items-start gap-2 text-[10px] text-slate-300 leading-relaxed">
+                          <span className={cn(
+                            "mt-1 inline-block w-1.5 h-1.5 rounded-full",
+                            issue.severity === 'error' ? "bg-red-400" : "bg-amber-400"
+                          )} />
+                          <span>{issue.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="flex gap-2">
                 {flightState.currentStageIndex === 0 && flightState.activeComponentIds.length === 0 && !flightState.isCrashed && (

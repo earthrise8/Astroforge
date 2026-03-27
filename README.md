@@ -15,6 +15,12 @@ View your app in AI Studio: https://ai.studio/apps/d1adc113-3564-48b7-add1-b210b
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Create `.env.local` and set:
+   `GEMINI_API_KEY=your_key_here`
+   `API_PORT=8787`
+3. Run the API server in one terminal:
+   `npm run dev:api`
+4. Run the web app in a second terminal:
    `npm run dev`
+
+The web app proxies `/api/*` requests to `http://localhost:8787` in development.
