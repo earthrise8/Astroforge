@@ -2988,7 +2988,7 @@ export default function App() {
                                                 e.target.value = "";
                                               }
                                             }}
-                                            className="w-full bg-slate-900/50 border border-slate-700 rounded-lg py-1.5 px-2 text-[10px] text-slate-400 focus:outline-none focus:border-orange-500/50"
+                                            className="w-full bg-blue-950/50 border border-blue-700/50 rounded-lg py-1.5 px-2 text-[10px] text-blue-200 focus:outline-none focus:border-blue-400"
                                           >
                                             <option value="">+ Add Component</option>
                                             {design.components
@@ -3787,7 +3787,7 @@ export default function App() {
                                         e.target.value = "";
                                       }
                                     }}
-                                    className="w-full bg-slate-900/50 border border-slate-700 rounded-lg py-1.5 px-2 text-[10px] text-slate-400 focus:outline-none focus:border-orange-500/50"
+                                    className="w-full bg-blue-950/50 border border-blue-700/50 rounded-lg py-1.5 px-2 text-[10px] text-blue-200 focus:outline-none focus:border-blue-400"
                                   >
                                     <option value="">+ Add Component</option>
                                     {design.components
