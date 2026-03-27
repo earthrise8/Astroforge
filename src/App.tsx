@@ -821,7 +821,7 @@ export default function App() {
     scene.add(explosionPoints);
 
     // Exhaust Particles
-    const exhaustCount = 500;
+    const exhaustCount = 1600;
     const exhaustGeo = new THREE.BufferGeometry();
     const exhaustPos = new Float32Array(exhaustCount * 3);
     const exhaustVel = new Float32Array(exhaustCount * 3);
@@ -831,18 +831,18 @@ export default function App() {
     }
     exhaustGeo.setAttribute('position', new THREE.BufferAttribute(exhaustPos, 3));
     const exhaustMat = new THREE.PointsMaterial({
-      size: 0.8,
+      size: 0.95,
       transparent: true,
-      opacity: 0.8,
+      opacity: 0.9,
       blending: THREE.AdditiveBlending,
       vertexColors: false,
-      color: 0xffaa00
+      color: 0xffc88a
     });
     const exhaustPoints = new THREE.Points(exhaustGeo, exhaustMat);
     scene.add(exhaustPoints);
 
     // SRB Exhaust Particles
-    const srbExhaustCount = 800;
+    const srbExhaustCount = 1800;
     const srbExhaustGeo = new THREE.BufferGeometry();
     const srbExhaustPos = new Float32Array(srbExhaustCount * 3);
     const srbExhaustVel = new Float32Array(srbExhaustCount * 3);
@@ -852,11 +852,11 @@ export default function App() {
     }
     srbExhaustGeo.setAttribute('position', new THREE.BufferAttribute(srbExhaustPos, 3));
     const srbExhaustMat = new THREE.PointsMaterial({
-      size: 0.4,
+      size: 0.7,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.7,
       blending: THREE.AdditiveBlending,
-      color: 0xdddddd
+      color: 0xffe6c7
     });
     const srbExhaustPoints = new THREE.Points(srbExhaustGeo, srbExhaustMat);
     scene.add(srbExhaustPoints);
@@ -1271,7 +1271,10 @@ export default function App() {
 
   // Physics Loop
   const updatePhysics = () => {
-    if (modeRef.current !== 'flight' || flightStateRef.current.isCrashed || countdownRef.current !== null) {
+    const currentFlightState = flightStateRef.current;
+    const isPreLaunchIdle = currentFlightState.currentStageIndex === 0 && currentFlightState.activeComponentIds.length === 0;
+
+    if (modeRef.current !== 'flight' || currentFlightState.isCrashed || countdownRef.current !== null || isPreLaunchIdle) {
       requestRef.current = requestAnimationFrame(updatePhysics);
       return;
     }
@@ -1756,6 +1759,10 @@ export default function App() {
         const positions = points.geometry.attributes.position.array as Float32Array;
         const mat = points.material as THREE.PointsMaterial;
 
+        const altitude = Math.max(0, fs.altitude);
+        const atmosphereFactor = THREE.MathUtils.clamp(1 - altitude / 35000, 0, 1);
+        const vacuumFactor = 1 - atmosphereFactor;
+
         if (m === 'flight' && fs.isEngineActive && fs.throttle > 0 && !fs.isCrashed && !fs.isLanded && cd === null) {
           // Find all active engine nozzles
           const engineNozzles: THREE.Object3D[] = [];
@@ -1770,7 +1777,8 @@ export default function App() {
             
             // Emit new particles for each active nozzle
             engineNozzles.forEach(nozzle => {
-              const emitCount = Math.floor(3 * fs.throttle);
+              const emitCount = Math.max(1, Math.floor((6 + 8 * atmosphereFactor) * fs.throttle));
+              const spread = THREE.MathUtils.lerp(0.35, 2.5, vacuumFactor);
               for (let i = 0; i < emitCount; i++) {
                 let idx = -1;
                 for (let j = 0; j < lifetimes.length; j++) {
@@ -1781,32 +1789,31 @@ export default function App() {
                 }
                 
                 if (idx !== -1) {
-                  lifetimes[idx] = 1.0;
+                  lifetimes[idx] = THREE.MathUtils.lerp(1.25, 0.75, vacuumFactor);
                   const worldNozzlePos = new THREE.Vector3().setFromMatrixPosition(nozzle.matrixWorld);
                   positions[idx * 3] = worldNozzlePos.x;
                   positions[idx * 3 + 1] = worldNozzlePos.y;
                   positions[idx * 3 + 2] = worldNozzlePos.z;
 
                   const exhaustDir = new THREE.Vector3(0, -1, 0).applyEuler(new THREE.Euler(fs.rotation[0], fs.rotation[1], fs.rotation[2]));
-                  const speed = 10 + Math.random() * 20;
-                  velocities[idx * 3] = exhaustDir.x * speed + (Math.random() - 0.5) * 2;
-                  velocities[idx * 3 + 1] = exhaustDir.y * speed + (Math.random() - 0.5) * 2;
-                  velocities[idx * 3 + 2] = exhaustDir.z * speed + (Math.random() - 0.5) * 2;
+                  const speed = 12 + Math.random() * 16;
+                  velocities[idx * 3] = exhaustDir.x * speed + (Math.random() - 0.5) * spread;
+                  velocities[idx * 3 + 1] = exhaustDir.y * speed + (Math.random() - 0.5) * spread;
+                  velocities[idx * 3 + 2] = exhaustDir.z * speed + (Math.random() - 0.5) * spread;
                 }
               }
             });
           }
 
-          // Update color based on altitude
-          const alt = fs.altitude;
-          const altFactor = Math.min(alt / 50000, 1);
+          // Dense, warm plume in thicker air, wider and cooler tone in thinner air.
           const exhaustColor = new THREE.Color().lerpColors(
-            new THREE.Color(0xffaa00), 
-            new THREE.Color(0x00aaff), 
-            altFactor
+            new THREE.Color(0xffc27a),
+            new THREE.Color(0x9fc8ff),
+            vacuumFactor
           );
           mat.color = exhaustColor;
-          mat.opacity = 0.8 * (1 - altFactor * 0.4);
+          mat.size = THREE.MathUtils.lerp(0.8, 1.9, vacuumFactor);
+          mat.opacity = THREE.MathUtils.lerp(0.95, 0.55, vacuumFactor) * (0.35 + 0.65 * fs.throttle);
         } else {
           // Fade out existing particles if engine off
           let hasActive = false;
@@ -1822,7 +1829,7 @@ export default function App() {
             positions[i * 3] += velocities[i * 3] * 0.016;
             positions[i * 3 + 1] += velocities[i * 3 + 1] * 0.016;
             positions[i * 3 + 2] += velocities[i * 3 + 2] * 0.016;
-            lifetimes[i] -= 0.02; // Age particle
+            lifetimes[i] -= THREE.MathUtils.lerp(0.018, 0.032, vacuumFactor); // Age particle
           } else {
             // Move dead particles far away
             positions[i * 3] = 0;
@@ -1837,6 +1844,10 @@ export default function App() {
       if (srbExhaustParticles) {
         const { points, velocities, lifetimes } = srbExhaustParticles;
         const positions = points.geometry.attributes.position.array as Float32Array;
+        const mat = points.material as THREE.PointsMaterial;
+        const altitude = Math.max(0, fs.altitude);
+        const atmosphereFactor = THREE.MathUtils.clamp(1 - altitude / 35000, 0, 1);
+        const vacuumFactor = 1 - atmosphereFactor;
 
         if (m === 'flight' && fs.isSrbIgnited && fs.srbFuel > 0 && !fs.isCrashed && !fs.isLanded && cd === null) {
           points.visible = true;
@@ -1851,7 +1862,8 @@ export default function App() {
 
           // Emit new particles for each nozzle
           srbNozzles.forEach(nozzle => {
-            const emitCount = 2; // Smaller trails
+            const emitCount = Math.max(2, Math.floor(5 + 5 * atmosphereFactor));
+            const spread = THREE.MathUtils.lerp(0.5, 3.0, vacuumFactor);
             for (let i = 0; i < emitCount; i++) {
               let idx = -1;
               for (let j = 0; j < lifetimes.length; j++) {
@@ -1862,20 +1874,28 @@ export default function App() {
               }
               
               if (idx !== -1) {
-                lifetimes[idx] = 0.8; // Shorter life
+                lifetimes[idx] = THREE.MathUtils.lerp(1.1, 0.55, vacuumFactor);
                 const worldNozzlePos = new THREE.Vector3().setFromMatrixPosition(nozzle.matrixWorld);
                 positions[idx * 3] = worldNozzlePos.x;
                 positions[idx * 3 + 1] = worldNozzlePos.y;
                 positions[idx * 3 + 2] = worldNozzlePos.z;
 
                 const exhaustDir = new THREE.Vector3(0, -1, 0).applyEuler(new THREE.Euler(fs.rotation[0], fs.rotation[1], fs.rotation[2]));
-                const speed = 8 + Math.random() * 12;
-                velocities[idx * 3] = exhaustDir.x * speed + (Math.random() - 0.5) * 1.5;
-                velocities[idx * 3 + 1] = exhaustDir.y * speed + (Math.random() - 0.5) * 1.5;
-                velocities[idx * 3 + 2] = exhaustDir.z * speed + (Math.random() - 0.5) * 1.5;
+                const speed = 9 + Math.random() * 10;
+                velocities[idx * 3] = exhaustDir.x * speed + (Math.random() - 0.5) * spread;
+                velocities[idx * 3 + 1] = exhaustDir.y * speed + (Math.random() - 0.5) * spread;
+                velocities[idx * 3 + 2] = exhaustDir.z * speed + (Math.random() - 0.5) * spread;
               }
             }
           });
+
+          mat.color = new THREE.Color().lerpColors(
+            new THREE.Color(0xffe0bf),
+            new THREE.Color(0xb2d4ff),
+            vacuumFactor
+          );
+          mat.size = THREE.MathUtils.lerp(0.65, 1.6, vacuumFactor);
+          mat.opacity = THREE.MathUtils.lerp(0.85, 0.5, vacuumFactor);
         } else {
           let hasActive = false;
           for (let i = 0; i < lifetimes.length; i++) {
@@ -1890,7 +1910,7 @@ export default function App() {
             positions[i * 3] += velocities[i * 3] * 0.016;
             positions[i * 3 + 1] += velocities[i * 3 + 1] * 0.016;
             positions[i * 3 + 2] += velocities[i * 3 + 2] * 0.016;
-            lifetimes[i] -= 0.03;
+            lifetimes[i] -= THREE.MathUtils.lerp(0.024, 0.04, vacuumFactor);
           } else {
             positions[i * 3] = 0;
             positions[i * 3 + 1] = -1000;
@@ -2266,6 +2286,58 @@ export default function App() {
     playLaunchRumble();
   };
 
+  const triggerComponentAction = (comp: RocketComponent, action: 'start' | 'stop' | 'deploy' | 'stow') => {
+    setFlightState(prev => {
+      const activeComponentIds = [...prev.activeComponentIds];
+      const isPropulsionComponent = comp.type === 'engine' || comp.type === 'srb';
+
+      if (isPropulsionComponent) {
+        if (action === 'start' && !activeComponentIds.includes(comp.instanceId)) {
+          activeComponentIds.push(comp.instanceId);
+        }
+        if (action === 'stop') {
+          const idx = activeComponentIds.indexOf(comp.instanceId);
+          if (idx !== -1) activeComponentIds.splice(idx, 1);
+        }
+      }
+
+      const hasActivePropulsion = activeComponentIds.some(id => {
+        const activeComp = design.components.find(c => c.instanceId === id);
+        if (!activeComp) return false;
+        if (prev.detachedComponentIds.includes(id)) return false;
+        return activeComp.type === 'engine' || activeComp.type === 'srb';
+      });
+
+      const hasActiveSrb = activeComponentIds.some(id => {
+        const activeComp = design.components.find(c => c.instanceId === id);
+        if (!activeComp) return false;
+        if (prev.detachedComponentIds.includes(id)) return false;
+        return activeComp.type === 'srb';
+      });
+
+      let isParachuteDeployed = prev.isParachuteDeployed;
+      if (comp.type === 'parachute') {
+        if (action === 'deploy') isParachuteDeployed = true;
+        if (action === 'stow') isParachuteDeployed = false;
+      }
+
+      return {
+        ...prev,
+        activeComponentIds,
+        isEngineActive: hasActivePropulsion,
+        isSrbIgnited: prev.isSrbIgnited || hasActiveSrb || (comp.type === 'srb' && action === 'start'),
+        isParachuteDeployed,
+      };
+    });
+  };
+
+  const beginLaunchCountdown = () => {
+    const isPreLaunchIdle = flightState.currentStageIndex === 0 && flightState.activeComponentIds.length === 0;
+    if (mode !== 'flight' || countdown !== null || flightState.isCrashed || !isPreLaunchIdle) return;
+    setCountdown(3);
+    playCountdownSound(3);
+  };
+
   const startFlight = () => {
     const liquidFuelBySegment = getLiquidFuelBySegment();
     const liquidFuel = liquidFuelBySegment.reduce((sum, fuel) => sum + fuel, 0);
@@ -2291,8 +2363,6 @@ export default function App() {
     setFlightComponentPopups([]);
     setCameraOffset({ x: 0, y: 0, z: 0 });
     setCameraZoom(1);
-    setCountdown(3);
-    playCountdownSound(3);
   };
 
   useEffect(() => {
@@ -2417,16 +2487,28 @@ export default function App() {
                 className="bg-orange-600 hover:bg-orange-500 text-white px-8 py-3 rounded-full font-bold flex items-center gap-2 transition-all shadow-lg shadow-orange-900/20 group"
               >
                 <Play className="w-5 h-5 group-hover:scale-125 transition-transform" />
-                LAUNCH MISSION
+                SEND TO LAUNCH PAD
               </button>
             ) : (
-              <button 
-                onClick={resetBuild}
-                className="bg-slate-800 hover:bg-slate-700 text-white px-8 py-3 rounded-full font-bold flex items-center gap-2 transition-all"
-              >
-                <RotateCcw className="w-5 h-5" />
-                ABORT & REDESIGN
-              </button>
+              <div className="flex gap-2">
+                {flightState.currentStageIndex === 0 && flightState.activeComponentIds.length === 0 && !flightState.isCrashed && (
+                  <button
+                    onClick={beginLaunchCountdown}
+                    disabled={countdown !== null}
+                    className="bg-orange-600 hover:bg-orange-500 disabled:bg-orange-900/40 disabled:text-orange-300/60 text-white px-6 py-3 rounded-full font-bold flex items-center gap-2 transition-all"
+                  >
+                    <Play className="w-5 h-5" />
+                    {countdown !== null ? "COUNTDOWN..." : "START"}
+                  </button>
+                )}
+                <button 
+                  onClick={resetBuild}
+                  className="bg-slate-800 hover:bg-slate-700 text-white px-8 py-3 rounded-full font-bold flex items-center gap-2 transition-all"
+                >
+                  <RotateCcw className="w-5 h-5" />
+                  ABORT & REDESIGN
+                </button>
+              </div>
             )}
           </div>
         </header>
@@ -3189,6 +3271,8 @@ export default function App() {
 
                   const fuelMass = getComponentFuelMass(comp, flightState);
                   const heating = getComponentHeating(comp, flightState);
+                  const isDetached = flightState.detachedComponentIds.includes(comp.instanceId);
+                  const isActive = flightState.activeComponentIds.includes(comp.instanceId);
 
                   return (
                     <div
@@ -3229,6 +3313,44 @@ export default function App() {
                           <span className="text-slate-500">Heating</span>
                           <span className={cn("font-mono", heating > 900 ? "text-red-400" : heating > 550 ? "text-orange-300" : "text-green-300")}>{heating.toFixed(0)} C</span>
                         </div>
+                      </div>
+
+                      <div className="mt-2 pt-2 border-t border-slate-700/60 space-y-1.5">
+                        {(comp.type === 'engine' || comp.type === 'srb') && (
+                          <button
+                            onClick={() => triggerComponentAction(comp, isActive ? 'stop' : 'start')}
+                            disabled={isDetached || countdown !== null}
+                            className={cn(
+                              "w-full py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors",
+                              isActive
+                                ? "bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30"
+                                : "bg-orange-500/20 border border-orange-500/40 text-orange-300 hover:bg-orange-500/30",
+                              (isDetached || countdown !== null) && "opacity-40 cursor-not-allowed hover:bg-inherit"
+                            )}
+                          >
+                            {isActive ? 'Stop Component' : 'Start Component'}
+                          </button>
+                        )}
+
+                        {comp.type === 'parachute' && (
+                          <button
+                            onClick={() => triggerComponentAction(comp, flightState.isParachuteDeployed ? 'stow' : 'deploy')}
+                            disabled={isDetached || countdown !== null}
+                            className={cn(
+                              "w-full py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors border",
+                              flightState.isParachuteDeployed
+                                ? "bg-green-500/20 border-green-500/40 text-green-300 hover:bg-green-500/30"
+                                : "bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/25",
+                              (isDetached || countdown !== null) && "opacity-40 cursor-not-allowed hover:bg-inherit"
+                            )}
+                          >
+                            {flightState.isParachuteDeployed ? 'Stow Parachute' : 'Deploy Parachute'}
+                          </button>
+                        )}
+
+                        {isDetached && (
+                          <div className="text-[9px] text-red-300/80 uppercase tracking-widest font-bold">Detached component</div>
+                        )}
                       </div>
 
                       <button
@@ -3461,7 +3583,7 @@ export default function App() {
                   </button>
 
                   {isFlightStagingOpen && (
-                    <div className="max-h-80 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                    <div className="max-h-[min(65vh,36rem)] overflow-y-auto overscroll-contain touch-pan-y p-4 pr-2 space-y-3 custom-scrollbar">
                       <div className="flex justify-between items-center">
                         <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-500">Staging Sequence</h3>
                         <button
