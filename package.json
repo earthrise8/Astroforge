@@ -1,8 +1,36 @@
 {
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
+  "name": "@earthrise8/astroforge",
+  "version": "1.0.0",
+  "description": "A modern 3D web application with AI integration",
+  "private": false,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "homepage": "https://github.com/earthrise8/Astroforge#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/earthrise8/Astroforge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/earthrise8/Astroforge/issues"
+  },
+  "author": "earthrise8",
+  "license": "MIT",
+  "keywords": [
+    "3d",
+    "ai",
+    "react",
+    "three.js"
+  ],
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "dev:api": "tsx server/index.ts",
@@ -11,7 +39,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "echo \"No tests specified\" && exit 0",
     "start:api": "tsx server/index.ts"
   },
   "dependencies": {
