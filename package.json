@@ -41,7 +41,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "echo \"No tests specified\" && exit 0",
+    "test": "npm run build",
     "start:api": "tsx server/index.ts"
   },
   "dependencies": {
