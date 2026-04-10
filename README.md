@@ -31,8 +31,8 @@ This project can be deployed as a static frontend to GitHub Pages with npm:
 
 1. Install dependencies:
    `npm install`
-2. Build and publish the site:
-   `npm run deploy`
+2. Enable GitHub Pages in the repository settings and choose GitHub Actions as the source.
+3. Push to `main`, or run the `Deploy GitHub Pages` workflow manually.
 
 Notes:
 
