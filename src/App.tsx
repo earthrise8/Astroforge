@@ -145,6 +145,8 @@ const INITIAL_FLIGHT_STATE: FlightState = {
   detachedComponentIds: [],
 };
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
+
 interface SortableItemProps {
   comp: RocketComponent;
   index: number;
@@ -748,7 +750,7 @@ export default function App() {
   const analyzeRocket = async () => {
     setIsAiLoading(true);
     try {
-      const response = await fetch('/api/analysis/rocket', {
+      const response = await fetch(`${API_BASE_URL}/analysis/rocket`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
