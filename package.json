@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test"; "vitest",
+    "test": "vitest",
     "start:api": "tsx server/index.ts"
   },
   "dependencies": {
